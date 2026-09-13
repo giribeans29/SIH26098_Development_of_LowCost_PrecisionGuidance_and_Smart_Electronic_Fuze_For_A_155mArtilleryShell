@@ -1,0 +1,1613 @@
+5. Fuze implementation
+import processing.serial.*;
+
+// ============================================================
+// SERIAL CONFIGURATION
+// ============================================================
+
+Serial myPort;
+
+boolean serialEnabled = true;
+String serialPortName = "COM5";
+
+
+// ============================================================
+// SCREEN
+// ============================================================
+
+final int SCREEN_W = 1400;
+final int SCREEN_H = 700;
+
+void settings() {
+  size(SCREEN_W, SCREEN_H);
+}
+
+
+// ============================================================
+// SIMULATION STATES
+// ============================================================
+
+final int STATE_FLYING    = 0;
+final int STATE_EXPLODING = 1;
+final int STATE_FINISHED  = 2;
+
+int simulationState = STATE_FLYING;
+
+
+// ============================================================
+// PHYSICAL CONSTANTS
+// ============================================================
+
+// EXACT REAL-WORLD FLIGHT TIME
+final float TOTAL_FLIGHT_TIME = 15.0;
+
+// STANDARD GRAVITY
+final float GRAVITY = 9.81;
+
+
+// ============================================================
+// DISPLAY AREA
+// ============================================================
+
+// Leave room for the information panel on the right.
+
+final float SIM_LEFT  = 60;
+final float SIM_RIGHT = 1000;
+
+final float GROUND_Y = 620;
+
+
+// ============================================================
+// PROJECTILE PHYSICS
+// ============================================================
+
+// All of these are physical-world quantities.
+
+float xMeters;
+float yMeters;
+
+float vxMeters;
+float vyMeters;
+
+float vx0Meters;
+float vy0Meters;
+
+float initialVelocity;
+float launchAngleDeg;
+
+float targetRange;
+
+
+// ============================================================
+// SCREEN POSITION
+// ============================================================
+
+float x;
+float y;
+
+float launchX;
+
+
+// ============================================================
+// WORLD → SCREEN SCALE
+// ============================================================
+
+float pixelsPerMeter;
+
+
+// ============================================================
+// TIME
+// ============================================================
+
+int simulationStartMillis;
+
+float elapsedTime = 0;
+
+
+// ============================================================
+// TRAJECTORY
+// ============================================================
+
+ArrayList<PVector> path =
+  new ArrayList<PVector>();
+
+
+// ============================================================
+// ESP32
+// ============================================================
+
+boolean activationReceived = false;
+
+String lastSerialMessage = "WAITING";
+
+
+// ============================================================
+// EXPLOSION
+// ============================================================
+
+float explosionX;
+float explosionY;
+
+int explosionStartMillis;
+
+final int EXPLOSION_DURATION = 1800;
+
+
+// ============================================================
+// PAUSE
+// ============================================================
+
+boolean paused = false;
+
+int pauseStartMillis = 0;
+
+int totalPausedMillis = 0;
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+  println();
+  println("======================================");
+  println("15 SECOND PROJECTILE SIMULATION");
+  println("======================================");
+
+  println("Available serial ports:");
+  printArray(Serial.list());
+
+
+  // ----------------------------------------------------------
+  // CONNECT ESP32
+  // ----------------------------------------------------------
+
+  if (serialEnabled) {
+
+    try {
+
+      myPort = new Serial(
+        this,
+        serialPortName,
+        115200
+      );
+
+      myPort.clear();
+
+      println();
+      println("ESP32 CONNECTED");
+      println("PORT: " + serialPortName);
+      println("BAUD: 115200");
+      println();
+
+    }
+
+    catch (Exception e) {
+
+      println();
+      println("SERIAL CONNECTION FAILED");
+      println("Could not open " + serialPortName);
+      println();
+
+      serialEnabled = false;
+    }
+  }
+
+
+  startSimulation();
+}
+
+
+// ============================================================
+// MAIN LOOP
+// ============================================================
+
+void draw() {
+
+  background(20);
+
+
+  // ----------------------------------------------------------
+  // READ ESP32 FIRST
+  // ----------------------------------------------------------
+
+  readESP32();
+
+
+  // ----------------------------------------------------------
+  // UPDATE PHYSICS
+  // ----------------------------------------------------------
+
+  updateSimulation();
+
+
+  // ----------------------------------------------------------
+  // DRAW
+  // ----------------------------------------------------------
+
+  drawGround();
+
+  drawTrajectory();
+
+  drawProjectile();
+
+  drawDataPanel();
+}
+
+
+// ============================================================
+// SERIAL INPUT
+// ============================================================
+
+void readESP32() {
+
+  if (!serialEnabled || myPort == null) {
+    return;
+  }
+
+
+  while (myPort.available() > 0) {
+
+    String incoming =
+      myPort.readStringUntil('\n');
+
+
+    if (incoming == null) {
+      return;
+    }
+
+
+    incoming = trim(incoming);
+
+
+    if (incoming.length() == 0) {
+      continue;
+    }
+
+
+    println(
+      "ESP32 -> Processing: [" +
+      incoming +
+      "]"
+    );
+
+
+    lastSerialMessage = incoming;
+
+
+    String command =
+      incoming.toUpperCase();
+
+
+    // ========================================================
+    // ACTIVATION COMMANDS
+    // ========================================================
+
+    if (
+      command.equals("DETONATE") ||
+      command.equals("ACTIVATE") ||
+      command.equals("IMMEDIATE") ||
+      command.equals("PROXIMITY") ||
+      command.equals("TIMED_EXPIRED") ||
+      command.equals("STATUS: DETONATED") ||
+      command.equals("STATUS:DETONATED") ||
+      command.equals("EVENT:ACTIVATE")
+    ) {
+
+      activateProjectile();
+    }
+
+
+    // ========================================================
+    // RESET
+    // ========================================================
+
+    else if (
+      command.equals("RESET") ||
+      command.equals("STATUS: DISARMED") ||
+      command.equals("STATUS:DISARMED")
+    ) {
+
+      startSimulation();
+    }
+
+
+    // ========================================================
+    // ARMED
+    // ========================================================
+
+    else if (
+      command.equals("ARMED") ||
+      command.equals("STATUS: ARMED") ||
+      command.equals("STATUS:ARMED")
+    ) {
+
+      println("ESP32 SYSTEM ARMED");
+    }
+  }
+}
+
+
+// ============================================================
+// ACTIVATE PROJECTILE
+// ============================================================
+
+void activateProjectile() {
+
+  println();
+  println("======================================");
+  println("       ESP32 ACTIVATION RECEIVED");
+  println("======================================");
+
+
+  // Don't activate twice.
+
+  if (
+    simulationState == STATE_EXPLODING ||
+    simulationState == STATE_FINISHED
+  ) {
+
+    println("Simulation already finished.");
+
+    return;
+  }
+
+
+  // ----------------------------------------------------------
+  // RECORD ACTIVATION
+  // ----------------------------------------------------------
+
+  activationReceived = true;
+
+
+  // ----------------------------------------------------------
+  // SAVE CURRENT SCREEN POSITION
+  // ----------------------------------------------------------
+
+  explosionX = x;
+  explosionY = y;
+
+
+  println(
+    "Activation time: " +
+    nf(elapsedTime, 0, 3) +
+    " seconds"
+  );
+
+  println(
+    "Activation position: X=" +
+    nf(xMeters, 0, 2) +
+    " m, Y=" +
+    nf(yMeters, 0, 2) +
+    " m"
+  );
+
+
+  // ----------------------------------------------------------
+  // STOP PROJECTILE
+  // ----------------------------------------------------------
+
+  vxMeters = 0;
+  vyMeters = 0;
+
+
+  // ----------------------------------------------------------
+  // START EXPLOSION
+  // ----------------------------------------------------------
+
+  explosionStartMillis =
+    millis();
+
+
+  simulationState =
+    STATE_EXPLODING;
+
+
+  println("SIMULATION STATE -> EXPLODING");
+  println();
+}
+
+
+// ============================================================
+// UPDATE PHYSICS
+// ============================================================
+
+void updateSimulation() {
+
+  // ==========================================================
+  // FLIGHT
+  // ==========================================================
+
+  if (
+    simulationState == STATE_FLYING
+  ) {
+
+    if (paused) {
+      return;
+    }
+
+
+    // --------------------------------------------------------
+    // REAL ELAPSED TIME
+    // --------------------------------------------------------
+
+    elapsedTime =
+      (
+        millis()
+        -
+        simulationStartMillis
+        -
+        totalPausedMillis
+      )
+      /
+      1000.0;
+
+
+    // --------------------------------------------------------
+    // LIMIT TO 15 SECONDS
+    // --------------------------------------------------------
+
+    elapsedTime =
+      constrain(
+        elapsedTime,
+        0,
+        TOTAL_FLIGHT_TIME
+      );
+
+
+    // ========================================================
+    // REAL-WORLD PROJECTILE EQUATIONS
+    // ========================================================
+
+    // Horizontal:
+    //
+    // x = vx0 * t
+    //
+    // Vertical:
+    //
+    // y = vy0*t - 0.5*g*t²
+    //
+    // Here the projectile starts at y = 0.
+
+
+    xMeters =
+      vx0Meters *
+      elapsedTime;
+
+
+    yMeters =
+      vy0Meters *
+      elapsedTime
+      -
+      0.5 *
+      GRAVITY *
+      elapsedTime *
+      elapsedTime;
+
+
+    // --------------------------------------------------------
+    // VERTICAL VELOCITY
+    // --------------------------------------------------------
+
+    vyMeters =
+      vy0Meters -
+      GRAVITY *
+      elapsedTime;
+
+
+    vxMeters =
+      vx0Meters;
+
+
+    // ========================================================
+    // CONVERT WORLD POSITION TO SCREEN
+    // ========================================================
+
+    x =
+      launchX +
+      xMeters *
+      pixelsPerMeter;
+
+
+    y =
+      GROUND_Y -
+      yMeters *
+      pixelsPerMeter;
+
+
+    // --------------------------------------------------------
+    // NEVER DRAW BELOW GROUND
+    // --------------------------------------------------------
+
+    if (y > GROUND_Y) {
+      y = GROUND_Y;
+    }
+
+
+    // --------------------------------------------------------
+    // STORE TRAJECTORY
+    // --------------------------------------------------------
+
+    path.add(
+      new PVector(
+        x,
+        y
+      )
+    );
+
+
+    // ========================================================
+    // EXACT 15 SECOND COMPLETION
+    // ========================================================
+
+    if (
+      elapsedTime >= TOTAL_FLIGHT_TIME
+    ) {
+
+      elapsedTime =
+        TOTAL_FLIGHT_TIME;
+
+
+      // Exact final physical position.
+
+      xMeters =
+        targetRange;
+
+      yMeters =
+        0;
+
+
+      // Exact final screen position.
+
+      x =
+        launchX +
+        targetRange *
+        pixelsPerMeter;
+
+      y =
+        GROUND_Y;
+
+
+      // Stop the displayed projectile.
+
+      simulationState =
+        STATE_FINISHED;
+
+
+      println();
+      println("======================================");
+      println("15.000 SECOND FLIGHT COMPLETE");
+      println("PROJECTILE RETURNED TO HORIZONTAL");
+      println("======================================");
+      println();
+    }
+  }
+
+
+  // ==========================================================
+  // EXPLOSION
+  // ==========================================================
+
+  else if (
+    simulationState == STATE_EXPLODING
+  ) {
+
+    int explosionAge =
+      millis() -
+      explosionStartMillis;
+
+
+    if (
+      explosionAge >= EXPLOSION_DURATION
+    ) {
+
+      simulationState =
+        STATE_FINISHED;
+
+
+      println("Explosion animation finished.");
+    }
+  }
+}
+
+
+// ============================================================
+// START NEW SIMULATION
+// ============================================================
+
+void startSimulation() {
+
+  println();
+  println("--------------------------------------");
+  println("STARTING NEW SIMULATION");
+  println("--------------------------------------");
+
+
+  // ----------------------------------------------------------
+  // RESET STATE
+  // ----------------------------------------------------------
+
+  simulationState =
+    STATE_FLYING;
+
+
+  activationReceived =
+    false;
+
+
+  path.clear();
+
+
+  paused =
+    false;
+
+
+  pauseStartMillis =
+    0;
+
+
+  totalPausedMillis =
+    0;
+
+
+  // ==========================================================
+  // RANDOM RANGE
+  //
+  // Range is now the main variable.
+  //
+  // This is NOT randomly changing the launch angle.
+  // ==========================================================
+
+  targetRange =
+    random(
+      500,
+      900
+    );
+
+
+  // ==========================================================
+  // EXACT 15 SECOND VERTICAL MOTION
+  // ==========================================================
+
+  // For a projectile that starts and ends at the same
+  // vertical position:
+  //
+  // T = 2*vy0/g
+  //
+  // Therefore:
+  //
+  // vy0 = g*T/2
+  //
+  // This guarantees that y = 0 at exactly 15 seconds.
+
+
+  vy0Meters =
+    GRAVITY *
+    TOTAL_FLIGHT_TIME /
+    2.0;
+
+
+  // ==========================================================
+  // HORIZONTAL VELOCITY
+  // ==========================================================
+
+  // Range = horizontal velocity × time
+  //
+  // Therefore:
+  //
+  // vx0 = range / 15
+
+
+  vx0Meters =
+    targetRange /
+    TOTAL_FLIGHT_TIME;
+
+
+  // ==========================================================
+  // INITIAL VELOCITY
+  // ==========================================================
+
+  initialVelocity =
+    sqrt(
+      vx0Meters *
+      vx0Meters
+      +
+      vy0Meters *
+      vy0Meters
+    );
+
+
+  // ==========================================================
+  // RESULTING ANGLE
+  // ==========================================================
+
+  launchAngleDeg =
+    degrees(
+      atan2(
+        vy0Meters,
+        vx0Meters
+      )
+    );
+
+
+  // ==========================================================
+  // FIND SCREEN SCALE
+  // ==========================================================
+
+  // We want the complete trajectory:
+  //
+  // START -------------------------- END
+  //
+  // and its highest point
+  //
+  // to remain inside the visible simulation area.
+
+
+  float horizontalAvailable =
+    SIM_RIGHT -
+    SIM_LEFT;
+
+
+  // Maximum physical height:
+  //
+  // H = vy0² / (2g)
+
+
+  float maximumHeight =
+    (
+      vy0Meters *
+      vy0Meters
+    )
+    /
+    (
+      2.0 *
+      GRAVITY
+    );
+
+
+  // Vertical available space.
+
+  float verticalAvailable =
+    GROUND_Y -
+    50;
+
+
+  // Scale based on both dimensions.
+
+  float horizontalScale =
+    horizontalAvailable /
+    targetRange;
+
+
+  float verticalScale =
+    verticalAvailable /
+    maximumHeight;
+
+
+  // Use the smaller scale so BOTH dimensions fit.
+
+  pixelsPerMeter =
+    min(
+      horizontalScale,
+      verticalScale
+    );
+
+
+  // Slight safety margin.
+
+  pixelsPerMeter *= 0.90;
+
+
+  // ----------------------------------------------------------
+  // INITIAL POSITION
+  // ----------------------------------------------------------
+
+  launchX =
+    SIM_LEFT;
+
+
+  xMeters =
+    0;
+
+
+  yMeters =
+    0;
+
+
+  x =
+    launchX;
+
+
+  y =
+    GROUND_Y;
+
+
+  vxMeters =
+    vx0Meters;
+
+
+  vyMeters =
+    vy0Meters;
+
+
+  // ----------------------------------------------------------
+  // START REAL CLOCK
+  // ----------------------------------------------------------
+
+  simulationStartMillis =
+    millis();
+
+
+  elapsedTime =
+    0;
+
+
+  // ==========================================================
+  // DEBUG
+  // ==========================================================
+
+  println(
+    "Flight time       : EXACTLY 15.000 seconds"
+  );
+
+  println(
+    "Target range      : " +
+    nf(targetRange, 0, 2) +
+    " m"
+  );
+
+  println(
+    "Maximum height    : " +
+    nf(maximumHeight, 0, 2) +
+    " m"
+  );
+
+  println(
+    "Launch angle      : " +
+    nf(launchAngleDeg, 0, 2) +
+    " degrees"
+  );
+
+  println(
+    "Initial velocity  : " +
+    nf(initialVelocity, 0, 2) +
+    " m/s"
+  );
+
+  println(
+    "Horizontal speed  : " +
+    nf(vx0Meters, 0, 2) +
+    " m/s"
+  );
+
+  println(
+    "Vertical speed    : " +
+    nf(vy0Meters, 0, 2) +
+    " m/s"
+  );
+
+  println(
+    "Display scale     : " +
+    nf(pixelsPerMeter, 3, 2) +
+    " pixels/m"
+  );
+}
+
+
+// ============================================================
+// GROUND
+// ============================================================
+
+void drawGround() {
+
+  stroke(90);
+
+  strokeWeight(2);
+
+  line(
+    SIM_LEFT - 20,
+    GROUND_Y,
+    SIM_RIGHT + 20,
+    GROUND_Y
+  );
+
+
+  // ----------------------------------------------------------
+  // START MARKER
+  // ----------------------------------------------------------
+
+  stroke(120);
+
+  line(
+    launchX,
+    GROUND_Y - 8,
+    launchX,
+    GROUND_Y + 8
+  );
+
+
+  // ----------------------------------------------------------
+  // END MARKER
+  // ----------------------------------------------------------
+
+  if (targetRange > 0) {
+
+    float endX =
+      launchX +
+      targetRange *
+      pixelsPerMeter;
+
+
+    line(
+      endX,
+      GROUND_Y - 8,
+      endX,
+      GROUND_Y + 8
+    );
+  }
+}
+
+
+// ============================================================
+// TRAJECTORY
+// ============================================================
+
+void drawTrajectory() {
+
+  noFill();
+
+  stroke(
+    0,
+    200,
+    255,
+    180
+  );
+
+  strokeWeight(2);
+
+
+  beginShape();
+
+  for (
+    PVector p : path
+  ) {
+
+    // Never allow trajectory below horizontal.
+
+    float safeY =
+      min(
+        p.y,
+        GROUND_Y
+      );
+
+
+    vertex(
+      p.x,
+      safeY
+    );
+  }
+
+  endShape();
+}
+
+
+// ============================================================
+// PROJECTILE
+// ============================================================
+
+void drawProjectile() {
+
+  if (
+    simulationState == STATE_FLYING
+  ) {
+
+    noStroke();
+
+    fill(
+      255,
+      220,
+      0
+    );
+
+
+    ellipse(
+      x,
+      y,
+      14,
+      14
+    );
+  }
+
+
+  if (
+    simulationState == STATE_EXPLODING
+  ) {
+
+    drawExplosion();
+  }
+}
+
+
+// ============================================================
+// EXPLOSION
+// ============================================================
+
+void drawExplosion() {
+
+  int age =
+    millis() -
+    explosionStartMillis;
+
+
+  float progress =
+    constrain(
+      age /
+      (float)EXPLOSION_DURATION,
+      0,
+      1
+    );
+
+
+  // ----------------------------------------------------------
+  // OUTER BLAST
+  // ----------------------------------------------------------
+
+  float outerRadius =
+    lerp(
+      10,
+      150,
+      progress
+    );
+
+
+  float alpha =
+    lerp(
+      255,
+      0,
+      progress
+    );
+
+
+  noStroke();
+
+
+  fill(
+    255,
+    60,
+    0,
+    alpha
+  );
+
+
+  ellipse(
+    explosionX,
+    explosionY,
+    outerRadius * 1.6,
+    outerRadius * 1.6
+  );
+
+
+  // ----------------------------------------------------------
+  // MIDDLE
+  // ----------------------------------------------------------
+
+  fill(
+    255,
+    160,
+    0,
+    alpha
+  );
+
+
+  ellipse(
+    explosionX,
+    explosionY,
+    outerRadius,
+    outerRadius
+  );
+
+
+  // ----------------------------------------------------------
+  // CORE
+  // ----------------------------------------------------------
+
+  float coreRadius =
+    lerp(
+      40,
+      5,
+      progress
+    );
+
+
+  fill(
+    255,
+    255,
+    180,
+    alpha
+  );
+
+
+  ellipse(
+    explosionX,
+    explosionY,
+    coreRadius,
+    coreRadius
+  );
+
+
+  // ----------------------------------------------------------
+  // EXPANDING RING
+  // ----------------------------------------------------------
+
+  noFill();
+
+
+  stroke(
+    255,
+    200,
+    50,
+    alpha
+  );
+
+
+  strokeWeight(3);
+
+
+  ellipse(
+    explosionX,
+    explosionY,
+    outerRadius * 2,
+    outerRadius * 2
+  );
+
+
+  // ----------------------------------------------------------
+  // SECONDARY RING
+  // ----------------------------------------------------------
+
+  if (
+    progress > 0.15
+  ) {
+
+    float ringRadius =
+      map(
+        progress,
+        0.15,
+        1.0,
+        20,
+        180
+      );
+
+
+    stroke(
+      255,
+      100,
+      30,
+      alpha * 0.6
+    );
+
+
+    ellipse(
+      explosionX,
+      explosionY,
+      ringRadius,
+      ringRadius
+    );
+  }
+}
+
+
+// ============================================================
+// DATA PANEL
+// ============================================================
+
+void drawDataPanel() {
+
+  fill(
+    10,
+    10,
+    15,
+    235
+  );
+
+  stroke(
+    50,
+    70,
+    90
+  );
+
+  strokeWeight(1);
+
+
+  rect(
+    width - 380,
+    20,
+    360,
+    510,
+    8
+  );
+
+
+  // ----------------------------------------------------------
+  // TITLE
+  // ----------------------------------------------------------
+
+  fill(255);
+
+  textSize(18);
+
+
+  text(
+    "PROJECTILE SIMULATION",
+    width - 355,
+    50
+  );
+
+
+  stroke(80);
+
+
+  line(
+    width - 355,
+    62,
+    width - 45,
+    62
+  );
+
+
+  // ----------------------------------------------------------
+  // STATE
+  // ----------------------------------------------------------
+
+  fill(180);
+
+  textSize(14);
+
+
+  text(
+    "SIMULATION STATE",
+    width - 355,
+    95
+  );
+
+
+  if (
+    simulationState == STATE_FLYING
+  ) {
+
+    fill(
+      100,
+      220,
+      255
+    );
+
+
+    text(
+      "PROJECTILE FLYING",
+      width - 355,
+      120
+    );
+  }
+
+
+  else if (
+    simulationState == STATE_EXPLODING
+  ) {
+
+    fill(
+      255,
+      70,
+      30
+    );
+
+
+    text(
+      "ESP32 ACTIVATED",
+      width - 355,
+      120
+    );
+  }
+
+
+  else {
+
+    fill(180);
+
+
+    text(
+      "FLIGHT FINISHED",
+      width - 355,
+      120
+    );
+  }
+
+
+  // ----------------------------------------------------------
+  // TIME
+  // ----------------------------------------------------------
+
+  fill(200);
+
+
+  text(
+    "Elapsed: " +
+    nf(
+      elapsedTime,
+      0,
+      3
+    ) +
+    " / 15.000 s",
+    width - 355,
+    155
+  );
+
+
+  // ----------------------------------------------------------
+  // RANGE
+  // ----------------------------------------------------------
+
+  text(
+    "Range: " +
+    nf(
+      targetRange,
+      0,
+      1
+    ) +
+    " m",
+    width - 355,
+    180
+  );
+
+
+  // ----------------------------------------------------------
+  // HEIGHT
+  // ----------------------------------------------------------
+
+  float maximumHeight =
+    (
+      vy0Meters *
+      vy0Meters
+    )
+    /
+    (
+      2.0 *
+      GRAVITY
+    );
+
+
+  text(
+    "Maximum height: " +
+    nf(
+      maximumHeight,
+      0,
+      1
+    ) +
+    " m",
+    width - 355,
+    205
+  );
+
+
+  // ----------------------------------------------------------
+  // ANGLE
+  // ----------------------------------------------------------
+
+  text(
+    "Launch angle: " +
+    nf(
+      launchAngleDeg,
+      0,
+      2
+    ) +
+    "°",
+    width - 355,
+    230
+  );
+
+
+  // ----------------------------------------------------------
+  // POSITION
+  // ----------------------------------------------------------
+
+  text(
+    "X: " +
+    nf(
+      xMeters,
+      0,
+      1
+    ) +
+    " m",
+    width - 355,
+    260
+  );
+
+
+  text(
+    "Height: " +
+    nf(
+      max(
+        0,
+        yMeters
+      ),
+      0,
+      1
+    ) +
+    " m",
+    width - 355,
+    285
+  );
+
+
+  // ----------------------------------------------------------
+  // VELOCITY
+  // ----------------------------------------------------------
+
+  text(
+    "Velocity X: " +
+    nf(
+      vxMeters,
+      0,
+      1
+    ) +
+    " m/s",
+    width - 355,
+    315
+  );
+
+
+  text(
+    "Velocity Y: " +
+    nf(
+      vyMeters,
+      0,
+      1
+    ) +
+    " m/s",
+    width - 355,
+    340
+  );
+
+
+  // ----------------------------------------------------------
+  // ESP32
+  // ----------------------------------------------------------
+
+  stroke(60);
+
+
+  line(
+    width - 355,
+    365,
+    width - 45,
+    365
+  );
+
+
+  fill(255);
+
+
+  text(
+    "ESP32 EVENT",
+    width - 355,
+    395
+  );
+
+
+  if (
+    activationReceived
+  ) {
+
+    fill(
+      255,
+      70,
+      30
+    );
+
+
+    text(
+      "ACTIVATION RECEIVED",
+      width - 355,
+      420
+    );
+  }
+
+  else {
+
+    fill(
+      100,
+      200,
+      255
+    );
+
+
+    text(
+      "WAITING FOR ESP32",
+      width - 355,
+      420
+    );
+  }
+
+
+  // ----------------------------------------------------------
+  // LAST SERIAL MESSAGE
+  // ----------------------------------------------------------
+
+  fill(180);
+
+
+  text(
+    "Last serial message:",
+    width - 355,
+    450
+  );
+
+
+  fill(255);
+
+
+  text(
+    lastSerialMessage,
+    width - 355,
+    475
+  );
+
+
+  // ----------------------------------------------------------
+  // PORT
+  // ----------------------------------------------------------
+
+  fill(140);
+
+
+  text(
+    "Serial: " +
+    serialPortName +
+    " @ 115200",
+    width - 355,
+    505
+  );
+}
+
+
+// ============================================================
+// KEYBOARD
+// ============================================================
+
+void keyPressed() {
+
+  // R = RESET
+
+  if (
+    key == 'r' ||
+    key == 'R'
+  ) {
+
+    startSimulation();
+  }
+
+
+  // SPACE = PAUSE
+
+  else if (
+    key == ' '
+  ) {
+
+    if (!paused) {
+
+      paused = true;
+
+      pauseStartMillis =
+        millis();
+    }
+
+    else {
+
+      paused = false;
+
+      totalPausedMillis +=
+        millis() -
+        pauseStartMillis;
+    }
+  }
+}
