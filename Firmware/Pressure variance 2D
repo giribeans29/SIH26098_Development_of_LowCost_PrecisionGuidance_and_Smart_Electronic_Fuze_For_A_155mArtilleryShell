@@ -1,0 +1,479 @@
+// Physical Constants & Flow Properties
+float P_inf = 101325.0;            // Ambient pressure (Pa)
+float rho = 1.225;                 // Air density (kg/m^3)
+float U_inf = 50.0;                // Freestream speed (m/s)
+float q_inf = 0.5 * rho * U_inf * U_inf; // Dynamic pressure
+float P_stag = P_inf + q_inf;      // Stagnation pressure
+
+float P_min_display;
+float P_max_display;
+
+// Geometry (Meters)
+float r_body = 0.55;
+float x_neck = 1.4;
+float x_base = 7.5;
+float x_hub = 2.4;
+float stick_L = 3.825; // Scaled up 4.5x (originally 0.85)
+
+// Main Viewport Window Bounds (Pixels)
+float mainX = 70, mainY = 50, mainW = 680, mainH = 480;
+float physXMin = -2.0, physXMax = 9.0;
+float physYMin = -3.2, physYMax = 3.2;
+
+// Off-screen buffer & 2D Scalar Field Grid
+PGraphics fieldImg;
+int gridW = 180;
+int gridH = 110;
+float[][] pGrid = new float[gridW][gridH];
+boolean[][] maskGrid = new boolean[gridW][gridH];
+
+// Isobar Contour Levels
+int nContours = 16;
+float[] isoLevels = new float[nContours];
+
+// Streakline Fluid Particles
+int nParticles = 75;
+float[] px = new float[nParticles];
+float[] py = new float[nParticles];
+
+// MANUAL FIN ROTATION VARIABLES
+float phi_top = 0.0;
+float phi_bot = HALF_PI;
+float rotSpeed = 0.05; // Manual rotation increment per frame
+
+// Keyboard Control Array [Q, A, O, L]
+boolean[] keys = new boolean[4];
+
+void setup() {
+  size(1150, 600);
+  frameRate(60);
+
+  P_min_display = P_inf - 0.65 * q_inf;
+  P_max_display = P_stag;
+
+  fieldImg = createGraphics(gridW, gridH);
+
+  for (int k = 0; k < nContours; k++) {
+    isoLevels[k] = lerp(P_inf - 0.60 * q_inf, P_stag, (float)k / (nContours - 1));
+  }
+
+  for (int i = 0; i < nParticles; i++) {
+    px[i] = random(physXMin, physXMax);
+    py[i] = random(physYMin + 0.2, physYMax - 0.2);
+  }
+}
+
+void draw() {
+  background(255);
+
+  // Update Fin Angles via Keyboard Input
+  if (keys[0]) phi_top += rotSpeed;  // Q: Top Fin Clockwise
+  if (keys[1]) phi_top -= rotSpeed;  // A: Top Fin Anti-clockwise
+  if (keys[2]) phi_bot += rotSpeed;  // O: Bottom Fin Clockwise
+  if (keys[3]) phi_bot -= rotSpeed;  // L: Bottom Fin Anti-clockwise
+
+  // -----------------------------------------------------------
+  // 1. EVALUATE FLOW FIELD & DRAW RASTER BUFFER
+  // -----------------------------------------------------------
+  fieldImg.beginDraw();
+  fieldImg.loadPixels();
+
+  for (int j = 0; j < gridH; j++) {
+    float Y = map(j, 0, gridH - 1, physYMax, physYMin);
+
+    for (int i = 0; i < gridW; i++) {
+      float X = map(i, 0, gridW - 1, physXMin, physXMax);
+      int pIndex = i + j * gridW;
+
+      boolean insideNose = (X >= 0 && X < x_neck && abs(Y) <= r_body * sqrt(max(X, 0.0) / x_neck));
+      boolean insideBody = (X >= x_neck && X <= x_base && abs(Y) <= r_body);
+
+      if (insideNose || insideBody) {
+        maskGrid[i][j] = true;
+        pGrid[i][j] = P_inf;
+        fieldImg.pixels[pIndex] = color(240);
+        continue;
+      }
+      maskGrid[i][j] = false;
+
+      float u = U_inf;
+      float v = 0.0;
+
+      float dist_nose = sqrt(sq(max(-X, 0.0)) + 1.8 * Y * Y);
+      float decel_factor = 1.0 - exp(-dist_nose / 0.75);
+      u *= decel_factor;
+
+      float v_nose = 0.45 * U_inf * (Y >= 0 ? 1.0 : -1.0) * exp(-abs(X) / 0.9) * exp(-abs(Y) / 0.7);
+      v += v_nose;
+
+      float neck_blend = 0.5 * (1.0 + (float)Math.tanh(1.5 * (X - x_neck)));
+      float base_blend = 0.5 * (1.0 - (float)Math.tanh(2.0 * (X - x_base)));
+      float smooth_body_weight = neck_blend * base_blend;
+      u += 0.28 * U_inf * sq(r_body) / (Y * Y + 0.25) * smooth_body_weight;
+
+      // Top Fin Aerodynamics (Scaled domain influence)
+      float x_blade_top = x_hub + 0.8 * sin(phi_top);
+      float dx_t = X - x_blade_top;
+      float dy_t = Y - r_body;
+      float r_sq_t = dx_t * dx_t + dy_t * dy_t + 0.16;
+
+      float Gamma_t = 0.65 * PI * sq(stick_L * 0.22) * cos(phi_top);
+      u += (Gamma_t / TWO_PI) * dy_t / r_sq_t;
+      v += -(Gamma_t / TWO_PI) * dx_t / r_sq_t;
+      float wake_t = exp(-max(dx_t, 0.0) / 1.8) * exp(-abs(dy_t) / 0.8);
+      u += -0.22 * U_inf * abs(cos(phi_top)) * wake_t;
+
+      // Bottom Fin Aerodynamics (Scaled domain influence)
+      float x_blade_bot = x_hub + 0.8 * sin(phi_bot);
+      float dx_b = X - x_blade_bot;
+      float dy_b = Y - (-r_body);
+      float r_sq_b = dx_b * dx_b + dy_b * dy_b + 0.16;
+
+      float Gamma_b = 0.65 * PI * sq(stick_L * 0.22) * cos(phi_bot);
+      u += (Gamma_b / TWO_PI) * dy_b / r_sq_b;
+      v += -(Gamma_b / TWO_PI) * dx_b / r_sq_b;
+      float wake_b = exp(-max(dx_b, 0.0) / 1.8) * exp(-abs(dy_b) / 0.8);
+      u += -0.22 * U_inf * abs(cos(phi_bot)) * wake_b;
+
+      // Radiating Waves & Pressure
+      float P_tunnel = -0.06 * q_inf * (X - 3.5) / 5.0;
+      float r_wave_top = sqrt(sq(X - x_hub) + sq(Y - r_body) + 0.1);
+      float r_wave_bot = sqrt(sq(X - x_hub) + sq(Y + r_body) + 0.1);
+      float k_wave = 2.2;
+      float P_waves = 0.12 * q_inf * (cos(k_wave * r_wave_top - phi_top) / sqrt(r_wave_top + 0.5) +
+                                     cos(k_wave * r_wave_bot - phi_bot) / sqrt(r_wave_bot + 0.5));
+
+      float V_sq = u * u + v * v;
+      float P_abs = P_inf + 0.5 * rho * (U_inf * U_inf - V_sq) + P_tunnel + P_waves;
+      P_abs = min(P_abs, P_stag);
+
+      pGrid[i][j] = P_abs;
+
+      float normP = constrain((P_abs - P_min_display) / (P_max_display - P_min_display), 0.0, 1.0);
+      fieldImg.pixels[pIndex] = getInterpolatedColor(normP);
+    }
+  }
+
+  fieldImg.updatePixels();
+  fieldImg.endDraw();
+
+  image(fieldImg, mainX, mainY, mainW, mainH);
+
+  // -----------------------------------------------------------
+  // 2. MARCHING SQUARES ISOBAR CONTOUR LINES
+  // -----------------------------------------------------------
+  stroke(40, 40, 40, 190);
+  strokeWeight(1.0);
+  for (int k = 0; k < nContours; k++) {
+    renderContourLevel(isoLevels[k]);
+  }
+
+  // -----------------------------------------------------------
+  // 3. MAIN GEOMETRY OVERLAYS
+  // -----------------------------------------------------------
+  fill(240);
+  stroke(0);
+  strokeWeight(2);
+  beginShape();
+  for (float t = 0; t <= x_neck; t += 0.04) {
+    vertex(toScreenX(t), toScreenY(r_body * sqrt(t / x_neck)));
+  }
+  vertex(toScreenX(x_base), toScreenY(r_body));
+  vertex(toScreenX(x_base), toScreenY(-r_body));
+  for (float t = x_neck; t >= 0; t -= 0.04) {
+    vertex(toScreenX(t), toScreenY(-r_body * sqrt(t / x_neck)));
+  }
+  endShape(CLOSE);
+
+  // Recessed Cavity Cuts (Expanded to match larger fin hub size)
+  stroke(0);
+  strokeWeight(4);
+  float slotW = 1.20; // Expanded slot width
+  line(toScreenX(x_hub - slotW), toScreenY(r_body), toScreenX(x_hub + slotW), toScreenY(r_body));
+  line(toScreenX(x_hub - slotW), toScreenY(-r_body), toScreenX(x_hub + slotW), toScreenY(-r_body));
+
+  // Render Shaped Fin Surfaces (Scaled up 4.5x visually)
+  drawBodyFin(x_hub, r_body, phi_top);
+  drawBodyFin(x_hub, -r_body, phi_bot);
+
+  // -----------------------------------------------------------
+  // 4. PHYSICAL PARTICLE ADVECTION
+  // -----------------------------------------------------------
+  fill(0);
+  noStroke();
+  for (int i = 0; i < nParticles; i++) {
+    px[i] += (U_inf * 0.14) * 0.025;
+
+    if (px[i] >= 0.0 && px[i] <= x_base && abs(py[i]) <= (r_body + 0.05)) {
+      py[i] += (py[i] >= 0 ? 1.0 : -1.0) * 0.06;
+    }
+
+    if (px[i] > physXMax || abs(py[i]) > physYMax) {
+      px[i] = physXMin;
+      py[i] = random(physYMin + 0.2, physYMax - 0.2);
+    }
+
+    ellipse(toScreenX(px[i]), toScreenY(py[i]), 3, 3);
+  }
+
+  stroke(0);
+  strokeWeight(1.5);
+  noFill();
+  rect(mainX, mainY, mainW, mainH);
+
+  drawMainAxesLabels();
+
+  // -----------------------------------------------------------
+  // 5. COLORBAR, INSET WINDOWS & ON-SCREEN CONTROLS
+  // -----------------------------------------------------------
+  drawColorbar(770, 50, 16, 480);
+  drawInset(840, 50, 250, 215, "Top Fin Control [Q / A]", phi_top);
+  drawInset(840, 315, 250, 215, "Bottom Fin Control [O / L]", phi_bot);
+}
+
+// -------------------------------------------------------------
+// FIN VISUALIZATION RENDERERS
+// -------------------------------------------------------------
+void drawBodyFin(float xCenter, float yCenter, float angle) {
+  pushMatrix();
+  translate(toScreenX(xCenter), toScreenY(yCenter));
+  
+  // Scaled projection dimensions (4.5x larger width and thickness)
+  float projectionWidth = map(abs(cos(angle)), 0, 1, 27, 117);
+  float thickness = map(abs(sin(angle)), 0, 1, 18, 45);
+  
+  fill(200, 30, 30);
+  stroke(50);
+  strokeWeight(1.5);
+  
+  // Aerodynamic Fin Shape Projection
+  beginShape();
+  vertex(-projectionWidth * 0.5, 0);
+  vertex(-projectionWidth * 0.2, -thickness * 0.5);
+  vertex(projectionWidth * 0.5, 0);
+  vertex(-projectionWidth * 0.2, thickness * 0.5);
+  endShape(CLOSE);
+  
+  fill(80);
+  ellipse(0, 0, 8, 8);
+  popMatrix();
+}
+
+void drawInset(float ix, float iy, float iw, float ih, String titleText, float phi) {
+  stroke(0);
+  strokeWeight(1.2);
+  fill(255);
+  rect(ix, iy, iw, ih);
+
+  fill(0);
+  textSize(11);
+  textAlign(CENTER, TOP);
+  text(titleText, ix + iw * 0.5, iy + 8);
+
+  float inXMin = 0.5, inXMax = 4.3; // Extended bounds to fit scaled fin profile
+  float inZMin = -2.2, inZMax = 2.2;
+
+  stroke(220);
+  strokeWeight(1);
+  line(ix + 15, iy + ih * 0.5, ix + iw - 15, iy + ih * 0.5);
+  line(ix + iw * 0.5, iy + 25, ix + iw * 0.5, iy + ih - 20);
+
+  float slotW = 1.20;
+  float cX1 = map(x_hub - slotW, inXMin, inXMax, ix + 20, ix + iw - 20);
+  float cX2 = map(x_hub + slotW, inXMin, inXMax, ix + 20, ix + iw - 20);
+  float cZ1 = map(-stick_L * 0.5 - 0.2, inZMin, inZMax, iy + ih - 25, iy + 25);
+  float cZ2 = map( stick_L * 0.5 + 0.2, inZMin, inZMax, iy + ih - 25, iy + 25);
+
+  fill(235);
+  stroke(100);
+  strokeWeight(1);
+  rect(cX1, cZ2, cX2 - cX1, cZ1 - cZ2);
+
+  // Structural Airfoil Fin Rendering in Inset
+  float hubScreenX = map(x_hub, inXMin, inXMax, ix + 20, ix + iw - 20);
+  float hubScreenZ = map(0.0, inZMin, inZMax, iy + ih - 25, iy + 25);
+
+  pushMatrix();
+  translate(hubScreenX, hubScreenZ);
+  rotate(-phi);
+
+  fill(220, 30, 30);
+  stroke(40);
+  strokeWeight(1.5);
+
+  // Detailed Scaled-up 2D Fin Profile
+  float finL = map(stick_L, 0, 4.0, 0, iw - 50);
+  beginShape();
+  vertex(-20, -finL * 0.5);
+  vertex(0, -finL * 0.5 - 12); // Scaled Tapered Tip
+  vertex(20, -finL * 0.5);
+  vertex(24, finL * 0.5);
+  vertex(-24, finL * 0.5);
+  endShape(CLOSE);
+
+  // Fin Mechanical Shaft/Hub
+  fill(60);
+  ellipse(0, 0, 10, 10);
+  popMatrix();
+
+  fill(0);
+  textSize(9);
+  textAlign(CENTER, BOTTOM);
+  text("Angle: " + nf(degrees(phi) % 360, 0, 1) + "°", ix + iw * 0.5, iy + ih - 4);
+}
+
+// -------------------------------------------------------------
+// KEYBOARD CONTROLS (Continuous Press Handling)
+// -------------------------------------------------------------
+void keyPressed() {
+  if (key == 'q' || key == 'Q') keys[0] = true;
+  if (key == 'a' || key == 'A') keys[1] = true;
+  if (key == 'o' || key == 'O') keys[2] = true;
+  if (key == 'l' || key == 'L') keys[3] = true;
+}
+
+void keyReleased() {
+  if (key == 'q' || key == 'Q') keys[0] = false;
+  if (key == 'a' || key == 'A') keys[1] = false;
+  if (key == 'o' || key == 'O') keys[2] = false;
+  if (key == 'l' || key == 'L') keys[3] = false;
+}
+
+// -------------------------------------------------------------
+// HELPER FUNCTIONS & COORDINATE TRANSFORMATIONS
+// -------------------------------------------------------------
+void renderContourLevel(float iso) {
+  for (int j = 0; j < gridH - 1; j++) {
+    for (int i = 0; i < gridW - 1; i++) {
+      if (maskGrid[i][j] || maskGrid[i+1][j] || maskGrid[i+1][j+1] || maskGrid[i][j+1]) continue;
+
+      float v0 = pGrid[i][j];
+      float v1 = pGrid[i+1][j];
+      float v2 = pGrid[i+1][j+1];
+      float v3 = pGrid[i][j+1];
+
+      int code = 0;
+      if (v0 >= iso) code |= 1;
+      if (v1 >= iso) code |= 2;
+      if (v2 >= iso) code |= 4;
+      if (v3 >= iso) code |= 8;
+
+      if (code == 0 || code == 15) continue;
+
+      float x0 = mainX + (float)i / (gridW - 1) * mainW;
+      float x1 = mainX + (float)(i + 1) / (gridW - 1) * mainW;
+      float y0 = mainY + (float)j / (gridH - 1) * mainH;
+      float y1 = map(j + 1, 0, gridH - 1, mainY, mainY + mainH);
+
+      PVector topEdge    = new PVector(lerp(x0, x1, (iso - v0) / (v1 - v0)), y0);
+      PVector rightEdge  = new PVector(x1, lerp(y0, y1, (iso - v1) / (v2 - v1)));
+      PVector bottomEdge = new PVector(lerp(x0, x1, (iso - v3) / (v2 - v3)), y1);
+      PVector leftEdge   = new PVector(x0, lerp(y0, y1, (iso - v0) / (v3 - v0)));
+
+      switch (code) {
+        case 1:  case 14: line(leftEdge.x, leftEdge.y, topEdge.x, topEdge.y); break;
+        case 2:  case 13: line(topEdge.x, topEdge.y, rightEdge.x, rightEdge.y); break;
+        case 3:  case 12: line(leftEdge.x, leftEdge.y, rightEdge.x, rightEdge.y); break;
+        case 4:  case 11: line(rightEdge.x, rightEdge.y, bottomEdge.x, bottomEdge.y); break;
+        case 5:
+          line(leftEdge.x, leftEdge.y, topEdge.x, topEdge.y);
+          line(rightEdge.x, rightEdge.y, bottomEdge.x, bottomEdge.y);
+          break;
+        case 6:  case 9:  line(topEdge.x, topEdge.y, bottomEdge.x, bottomEdge.y); break;
+        case 7:  case 8:  line(leftEdge.x, leftEdge.y, bottomEdge.x, bottomEdge.y); break;
+        case 10:
+          line(topEdge.x, topEdge.y, rightEdge.x, rightEdge.y);
+          line(leftEdge.x, leftEdge.y, bottomEdge.x, bottomEdge.y);
+          break;
+      }
+    }
+  }
+}
+
+float toScreenX(float xPhys) { return map(xPhys, physXMin, physXMax, mainX, mainX + mainW); }
+float toScreenY(float yPhys) { return map(yPhys, physYMax, physYMin, mainY, mainY + mainH); }
+
+color getInterpolatedColor(float val) {
+  float[] anchors = {0.0, 0.25, 0.50, 0.75, 1.0};
+  color[] colors = {
+    color(0, 50, 230),
+    color(0, 215, 215),
+    color(40, 190, 40),
+    color(255, 205, 0),
+    color(240, 20, 0)
+  };
+
+  for (int i = 0; i < 4; i++) {
+    if (val >= anchors[i] && val <= anchors[i + 1]) {
+      float frac = (val - anchors[i]) / (anchors[i + 1] - anchors[i]);
+      return lerpColor(colors[i], colors[i + 1], frac);
+    }
+  }
+  return colors[4];
+}
+
+void drawColorbar(float cx, float cy, float cw, float ch) {
+  for (int j = 0; j < (int)ch; j++) {
+    float norm = map(j, ch, 0, 0.0, 1.0);
+    stroke(getInterpolatedColor(norm));
+    strokeWeight(1);
+    line(cx, cy + j, cx + cw, cy + j);
+  }
+
+  stroke(0);
+  strokeWeight(1.2);
+  noFill();
+  rect(cx, cy, cw, ch);
+
+  fill(0);
+  textSize(10);
+  textAlign(LEFT, CENTER);
+  text(nfc((int)P_max_display) + " Pa (Stag)", cx + cw + 6, cy + 4);
+  text(nfc((int)P_inf) + " Pa (P_inf)", cx + cw + 6, cy + ch * 0.5);
+  text(nfc((int)P_min_display) + " Pa (Suct)", cx + cw + 6, cy + ch - 4);
+
+  pushMatrix();
+  translate(cx + cw + 65, cy + ch * 0.5);
+  rotate(HALF_PI);
+  textAlign(CENTER, CENTER);
+  textSize(11);
+  text("Absolute Pressure P (Pa)", 0, 0);
+  popMatrix();
+}
+
+void drawMainAxesLabels() {
+  fill(0);
+  textSize(12);
+  textAlign(CENTER, BOTTOM);
+  text("Flow Past Rocket with Recessed Flush-Mounted Fins", mainX + mainW * 0.5, mainY - 12);
+
+  textSize(11);
+  textAlign(CENTER, TOP);
+  text("Axial Station X (m)", mainX + mainW * 0.5, mainY + mainH + 8);
+
+  pushMatrix();
+  translate(mainX - 35, mainY + mainH * 0.5);
+  rotate(-HALF_PI);
+  textAlign(CENTER, BOTTOM);
+  text("Crossflow Station Y (m)", 0, 0);
+  popMatrix();
+
+  textSize(9);
+  textAlign(CENTER, TOP);
+  for (int xVal = -2; xVal <= 8; xVal += 2) {
+    float sx = toScreenX(xVal);
+    stroke(0);
+    strokeWeight(1);
+    line(sx, mainY + mainH, sx, mainY + mainH + 4);
+    text(xVal, sx, mainY + mainH + 6);
+  }
+
+  textAlign(RIGHT, CENTER);
+  for (int yVal = -3; yVal <= 3; yVal += 1) {
+    float sy = toScreenY(yVal);
+    stroke(0);
+    strokeWeight(1);
+    line(mainX - 4, sy, mainX, sy);
+    text(yVal, mainX - 6, sy);
+  }
+}
