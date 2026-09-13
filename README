@@ -1,1 +1,68 @@
+# 🚀 Smart 155mm Artillery Fuze & Embedded Flight Computer
 
+![SIH Badge](https://img.shields.io/badge/Smart_India_Hackathon-2026-orange?style=for-the-badge)
+![ESP32](https://img.shields.io/badge/Platform-ESP32--C3-blue?style=for-the-badge)
+![Control](https://img.shields.io/badge/Control_Logic-PID-FF6F00?style=for-the-badge)
+![C++](https://img.shields.io/badge/Language-C++-00599C?style=for-the-badge)
+
+## 📌 Project Overview
+This repository contains the firmware and hardware architecture for a highly miniaturized, self-contained fuzing system and flight computer designed for a 155mm artillery shell prototype. 
+
+Built entirely around a single-core RISC-V microcontroller, this system utilizes deterministic sensor fusion to calculate high-speed flight dynamics. It integrates multi-mode LIDAR fuzing, active aerodynamic fin control via a Proportional-Derivative (PD) controller, and aerospace-inspired environmental survivability architectures.
+
+## ✨ Key System Features
+* **📐 Deterministic Sensor Fusion:** Utilizes a highly optimized Complementary Filter to fuse MPU6050 accelerometer and gyroscope data, eliminating drift and mechanical noise with microsecond latency.
+* **⏱️ Non-Blocking RTOS-Style Scheduler:** Single-core time-budgeting architecture executing a "Fast Thread" (Sensor Fusion/PID/Actuation @ 100Hz) and a "Slow Thread" (OLED Telemetry/UART parsing @ 4Hz).
+* **🎯 Multi-Mode Fuzing State Machine:** Strict finite state machine handling safety arming sequences, timer-based fail-safes, and TFmini Plus LIDAR-triggered airburst detonations.
+* **🛡️ Compliant Encapsulation:** Hardware designed for extreme kinetic survivability utilizing EVA foam shock isolation, fused silica optical windows, and silicone RTV hermetic sealing.
+
+---
+
+## 🛠️ Hardware Architecture & BOM
+
+### The Processing & Sensor Core
+| Component | Function |
+| :--- | :--- |
+| **ESP32-C3 SuperMini** | Main Flight Computer (160MHz RISC-V) |
+| **MPU6050** | 6-DOF IMU for raw acceleration and rotational velocity |
+| **TFmini Plus LIDAR** | UART-based proximity sensor for precise airburst triggering |
+| **4x Micro Servos** | Active aerodynamic fin actuation |
+
+### Embedded Power & Safety (Benchtop Architecture)
+The power system completely untethers the prototype, utilizing a separated logic/muscle topology to prevent microcontroller brownouts during high-current servo stalls.
+* **Power Source:** 3.7V 1S LiPo Battery (High energy density).
+* **Battery Management (BMS):** TP4056 with DW01A protection IC (Over-discharge/Type-C charging).
+* **Voltage Regulation:** MT3608 Boost Converter (Stepping 3.7V up to a stable 5.0V power rail).
+* **Circuit Protection:** Inline PTC resettable polyfuse and Kapton/heat-shrink insulation.
+
+---
+
+## ⚙️ Flight Logic Pipeline
+
+The flight computer processes mechanical physics at 100Hz to maintain active stabilization.
+
+1. **Raw Acquisition:** The MPU6050 reads instantaneous acceleration and gyroscopic rates.
+2. **Noise Filtering:** A software Complementary Filter merges the fast-response gyroscope data with the stable, long-term accelerometer data to compute absolute Pitch and Yaw angles.
+3. **Control Loop:** A tuned Proportional-Derivative (PD) controller calculates the exact mechanical error between the current angle and the target trajectory.
+4. **Aerodynamic Inversion:** The PD error is mapped to specific servo PWM angles to physically actuate the 4 independent fins.
+
+---
+
+## 🛡️ Survivability & Environmental Encapsulation
+Designed to simulate military-grade environmental resistance:
+* **Thermal Deflection:** Polycarbonate structural shell with a ceramic-enamel treated radome and internal woven-fiberglass thermal breaks.
+* **Shock Mitigation:** Floating internal electronics bay suspended in custom-cut, closed-cell EVA foam to dampen high-G launch kinetics.
+* **Hermetic Sealing:** Silicone RTV gasketing and an internal silica gel desiccant matrix to prevent rapid-altitude condensation and electrical shorts.
+
+---
+
+## 💻 Software Setup & Installation
+
+### Prerequisites
+* [Arduino IDE](https://www.arduino.cc/en/software) or VSCode with PlatformIO.
+* ESP32 Board Manager installed.
+
+### Installation Steps
+1. Clone this repository:
+   ```bash
+   git clone [https://github.com/YourUsername/AeroFuze-SIH.git](https://github.com/YourUsername/AeroFuze-SIH.git)
