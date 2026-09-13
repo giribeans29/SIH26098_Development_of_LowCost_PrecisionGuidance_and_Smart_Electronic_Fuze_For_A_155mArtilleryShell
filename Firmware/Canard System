@@ -1,0 +1,145 @@
+#include <Wire.h>
+#include <Servo.h>
+
+// ==========================================
+// HARDWARE PIN DEFINITIONS
+// ==========================================
+const int MPU_ADDR = 0x68;
+
+const int SERVO_TOP_PIN    = 8;  
+const int SERVO_BOTTOM_PIN = 9;  
+const int SERVO_LEFT_PIN   = 10; 
+const int SERVO_RIGHT_PIN  = 11; 
+
+Servo servoTop, servoRight, servoBottom, servoLeft;
+
+// ==========================================
+// AERODYNAMIC CONSTANTS & PID TUNING
+// ==========================================
+const float rho = 1.225;          
+const float Sc = 0.002;           
+const float C_La = 6.28;          
+const float lc = 0.4;             
+
+const float Kp_pitch = 50.0;            
+const float Kd_pitch = 10.0;            
+const float Kp_yaw = 40.0;
+const float Kd_yaw = 8.0;
+
+// ==========================================
+// STATE VARIABLES
+// ==========================================
+float prev_pitch_error = 0.0;
+float prev_yaw_error = 0.0;
+float actual_yaw_deg = 0.0; 
+unsigned long lastComputeTime = 0;
+
+float target_pitch_deg = 0.0;
+float target_yaw_deg = 0.0; 
+
+// The global string variable for Processing data
+String incomingData;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.setTimeout(5); 
+  
+  // CRITICAL FIX: Pre-allocate 32 bytes of memory for the string. 
+  // This completely prevents the RAM fragmentation that caused the freezing.
+  incomingData.reserve(32); 
+
+  Wire.begin();
+
+  // Wake MPU-6050
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B); 
+  Wire.write(0);    
+  Wire.endTransmission(true);
+  
+  // Set Gyro to 500 deg/s range
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x1B);
+  Wire.write(0x08);
+  Wire.endTransmission(true);
+
+  servoTop.attach(SERVO_TOP_PIN, 1000, 2000);
+  servoRight.attach(SERVO_RIGHT_PIN, 1000, 2000);
+  servoBottom.attach(SERVO_BOTTOM_PIN, 1000, 2000);
+  servoLeft.attach(SERVO_LEFT_PIN, 1000, 2000);
+
+  servoTop.write(90);
+  servoRight.write(90);
+  servoBottom.write(90);
+  servoLeft.write(90);
+  
+  lastComputeTime = millis();
+}
+
+void loop() {
+  // 1. READ TARGET FROM PROCESSING
+  if (Serial.available() > 0) {
+    incomingData = Serial.readStringUntil('\n');
+    int commaIndex = incomingData.indexOf(',');
+    
+    if (commaIndex > 0) {
+      target_pitch_deg = incomingData.substring(0, commaIndex).toFloat();
+      target_yaw_deg = incomingData.substring(commaIndex + 1).toFloat();
+    }
+  }
+
+  // 2. RUN SENSOR MATH & PID (Locked to 10ms / 100Hz loop)
+  unsigned long currentTime = millis();
+  if (currentTime - lastComputeTime >= 10) {
+    float dt_sec = (currentTime - lastComputeTime) / 1000.0;
+    lastComputeTime = currentTime;
+
+    // --- Fetch Raw MPU-6050 Data ---
+    Wire.beginTransmission(MPU_ADDR);
+    Wire.write(0x3B);
+    Wire.endTransmission(false);
+    Wire.requestFrom(MPU_ADDR, 14, true);
+
+    int16_t accelX = Wire.read() << 8 | Wire.read();
+    int16_t accelY = Wire.read() << 8 | Wire.read();
+    int16_t accelZ = Wire.read() << 8 | Wire.read();
+    Wire.read(); Wire.read(); // Discard temp bytes
+    int16_t gyroX = Wire.read() << 8 | Wire.read();
+    int16_t gyroY = Wire.read() << 8 | Wire.read();
+    int16_t gyroZ = Wire.read() << 8 | Wire.read();
+
+    // --- Calculate Actual Angles ---
+    float actual_pitch_deg = atan2(accelX, sqrt(sq((float)accelY) + sq((float)accelZ))) * (180.0 / PI);
+    
+    // Divisor is 65.5 for 500 deg/s gyro scale
+    float gyroZ_deg_s = gyroZ / 65.5; 
+    actual_yaw_deg += gyroZ_deg_s * dt_sec;
+
+    // --- Pitch PID Math ---
+    float pitch_error_rad = radians(target_pitch_deg - actual_pitch_deg);
+    float pitch_rate_rad = (pitch_error_rad - prev_pitch_error) / dt_sec;
+    prev_pitch_error = pitch_error_rad;
+    float M_cmd_pitch = (Kp_pitch * pitch_error_rad) + (Kd_pitch * pitch_rate_rad);
+
+    // --- Yaw/Roll PID Math ---
+    float yaw_error_rad = radians(target_yaw_deg - actual_yaw_deg);
+    float yaw_rate_rad = (yaw_error_rad - prev_yaw_error) / dt_sec;
+    prev_yaw_error = yaw_error_rad;
+    float M_cmd_yaw = (Kp_yaw * yaw_error_rad) + (Kd_yaw * yaw_rate_rad);
+
+    // --- Aerodynamic Inversion ---
+    // Kept at 5.0 m/s for aggressive physical testing
+    float test_velocity_ms = 5.0; 
+    float dynamic_pressure = 0.5 * rho * sq(test_velocity_ms);
+    float moment_per_rad = dynamic_pressure * Sc * C_La * lc;
+
+    // Convert requested moments into physical fin angles (Max +/- 15 degrees)
+    float alpha_pitch_deg = constrain(degrees(M_cmd_pitch / moment_per_rad), -15.0, 15.0); 
+    float alpha_yaw_deg = constrain(degrees(M_cmd_yaw / moment_per_rad), -15.0, 15.0); 
+
+    // --- Actuate Servos ---
+    servoTop.write(map((int)alpha_yaw_deg, -15, 15, 75, 105));
+    servoBottom.write(map((int)-alpha_yaw_deg, -15, 15, 75, 105)); 
+    servoRight.write(map((int)alpha_pitch_deg, -15, 15, 75, 105));
+    servoLeft.write(map((int)-alpha_pitch_deg, -15, 15, 75, 105));  
+  }
+}
