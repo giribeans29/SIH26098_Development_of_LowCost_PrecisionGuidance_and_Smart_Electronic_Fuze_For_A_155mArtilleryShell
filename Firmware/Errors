@@ -1,0 +1,316 @@
+4. Errors
+import processing.serial.*;
+
+// =================================================================
+// 1. LAUNCH & SIMULATION CONFIGURATION
+// =================================================================
+float initialVelocity = 180;
+float launchAngleDeg = 45;
+float gravity = 9.81 * 8;
+
+int totalRuns = 15;                       // Number of simultaneous paths
+ArrayList<ArrayList<PVector>> allPaths = new ArrayList<ArrayList<PVector>>();
+ArrayList<PVector> targetPath = new ArrayList<PVector>();
+ArrayList<PVector> impactPoints = new ArrayList<PVector>();
+
+PVector targetPoint;
+float launchX = 80;
+float launchY;
+
+// Animation Control
+int activeFrameIndex = 0;
+int maxPathLength = 0;
+boolean isSimulating = true;
+boolean showTopView = false;
+
+Table csvTable;
+
+// =================================================================
+// 2. SETUP & INITIALIZATION
+// =================================================================
+void setup() {
+  size(1400, 700);
+  launchY = height - 120;
+
+  calculateIdealPath();
+  generateAllErrorPaths();
+  initCSVTable();
+}
+
+void calculateIdealPath() {
+  targetPath.clear();
+  float rad = radians(launchAngleDeg);
+  float vx0 = initialVelocity * cos(rad);
+  float vy0 = initialVelocity * sin(rad);
+
+  float t = 0;
+  float dt = 0.016;
+  while (true) {
+    float ix = launchX + vx0 * t;
+    float iy = launchY - (vy0 * t - 0.5 * gravity * t * t);
+    targetPath.add(new PVector(ix, iy));
+
+    if (iy >= launchY && t > 0.1) {
+      targetPoint = new PVector(ix, launchY);
+      break;
+    }
+    t += dt;
+  }
+}
+
+// Generate paths with bidirectional noise (overshoot + undershoot + lateral drift)
+void generateAllErrorPaths() {
+  allPaths.clear();
+  impactPoints.clear();
+  maxPathLength = 0;
+  float dt = 0.016;
+
+  for (int run = 0; run < totalRuns; run++) {
+    ArrayList<PVector> runPath = new ArrayList<PVector>();
+    
+    // Symmetric error distributions to allow overshooting beyond target
+    float velocityNoise = random(-20.0, 25.0); // Positive values lead to overshooting
+    float angleNoise = random(-4.0, 4.0);
+    float dragCoeff = random(0.0001, 0.0008); 
+    float windBias = random(-12.0, 14.0);      // Headwind (negative) vs Tailwind (positive)
+
+    float rad = radians(launchAngleDeg + angleNoise);
+    float vx = (initialVelocity + velocityNoise) * cos(rad);
+    float vy = (initialVelocity + velocityNoise) * sin(rad);
+
+    float cx = launchX;
+    float cy = launchY;
+    float t = 0;
+
+    while (cy <= launchY || t < 0.1) {
+      runPath.add(new PVector(cx, cy));
+
+      float speed = sqrt(vx * vx + vy * vy);
+      float dragX = -dragCoeff * speed * vx;
+      float dragY = -dragCoeff * speed * vy;
+      float windNoise = (noise(t * 3.0, run * 15.0) - 0.48) * 12.0 + windBias;
+
+      vx += (dragX + windNoise) * dt;
+      vy += (-gravity + dragY) * dt;
+
+      cx += vx * dt;
+      cy -= vy * dt;
+      t += dt;
+
+      if (cy >= launchY && t > 0.1) {
+        cy = launchY;
+        runPath.add(new PVector(cx, cy));
+        
+        // Lateral offset for 360-degree top view spread
+        float lateralOffset = random(-120.0, 120.0);
+        impactPoints.add(new PVector(cx, lateralOffset));
+        break;
+      }
+    }
+
+    if (runPath.size() > maxPathLength) {
+      maxPathLength = runPath.size();
+    }
+    allPaths.add(runPath);
+  }
+}
+
+// =================================================================
+// 3. MAIN DRAW LOOP
+// =================================================================
+void draw() {
+  background(15, 18, 25);
+
+  if (showTopView) {
+    renderTopViewMode();
+  } else {
+    renderSideTrajectoryMode();
+  }
+
+  drawDataPanel();
+}
+
+// =================================================================
+// 4. SIDE VIEW (SIMULTANEOUS FLIGHT)
+// =================================================================
+void renderSideTrajectoryMode() {
+  // Ground line
+  stroke(100);
+  strokeWeight(2);
+  line(0, launchY, width, launchY);
+
+  // 1. Target ideal reference line (Cyan)
+  stroke(0, 220, 255, 180);
+  strokeWeight(2);
+  noFill();
+  beginShape();
+  for (PVector p : targetPath) vertex(p.x, p.y);
+  endShape();
+
+  // Target Marker
+  drawTargetReticle(targetPoint.x, targetPoint.y);
+
+  // 2. Draw ALL errored paths SIMULTANEOUSLY up to active frame index
+  for (int r = 0; r < allPaths.size(); r++) {
+    ArrayList<PVector> pList = allPaths.get(r);
+    int currentLimit = min(activeFrameIndex, pList.size());
+
+    // Dynamic color gradient based on path index
+    stroke(255, 100 + (r * 10) % 155, 80, 160);
+    strokeWeight(1.5);
+    noFill();
+    beginShape();
+    for (int i = 0; i < currentLimit; i++) {
+      PVector p = pList.get(i);
+      vertex(p.x, p.y);
+    }
+    endShape();
+
+    // Moving projectile head marker for each active path
+    if (currentLimit > 0 && currentLimit < pList.size()) {
+      PVector head = pList.get(currentLimit - 1);
+      fill(255, 220, 0);
+      noStroke();
+      ellipse(head.x, head.y, 8, 8);
+    } else if (currentLimit >= pList.size()) {
+      // Landed mark on ground
+      PVector land = pList.get(pList.size() - 1);
+      fill(255, 50, 50, 180);
+      noStroke();
+      ellipse(land.x, land.y, 6, 6);
+    }
+  }
+
+  // Frame counter update for simultaneous motion
+  if (isSimulating) {
+    activeFrameIndex += 2;
+    if (activeFrameIndex >= maxPathLength + 20) {
+      isSimulating = false;
+      showTopView = true; // Auto transition to top view once all land
+    }
+  }
+}
+
+// =================================================================
+// 5. TOP-DOWN TARGET DISPERSION VIEW
+// =================================================================
+void renderTopViewMode() {
+  float centerX = width * 0.45;
+  float centerY = height * 0.5;
+
+  // Concentric target rings
+  noFill();
+  strokeWeight(1.5);
+
+  stroke(0, 255, 150, 80);
+  ellipse(centerX, centerY, 320, 320);
+  ellipse(centerX, centerY, 220, 220);
+  ellipse(centerX, centerY, 120, 120);
+
+  stroke(0, 255, 150);
+  ellipse(centerX, centerY, 20, 20);
+  line(centerX - 180, centerY, centerX + 180, centerY);
+  line(centerX, centerY - 180, centerX, centerY + 180);
+
+  fill(0, 255, 150);
+  textSize(12);
+  textAlign(CENTER, BOTTOM);
+  text("IDEAL TARGET POINT (0,0)", centerX, centerY - 185);
+
+  // Scatter plots (Supports both undershoot left and overshoot right/top/bottom)
+  for (int i = 0; i < impactPoints.size(); i++) {
+    PVector imp = impactPoints.get(i);
+    float dx = (imp.x - targetPoint.x) * 1.2;
+    float dy = imp.y;
+
+    float px = centerX + dx;
+    float py = centerY + dy;
+
+    stroke(255, 60, 60);
+    strokeWeight(2);
+    line(px - 5, py - 5, px + 5, py + 5);
+    line(px - 5, py + 5, px + 5, py - 5);
+
+    fill(220, 200);
+    textSize(9);
+    textAlign(LEFT, CENTER);
+    text("P" + (i + 1), px + 7, py);
+  }
+}
+
+// =================================================================
+// 6. HUD PANEL
+// =================================================================
+void drawDataPanel() {
+  fill(10, 12, 18, 230);
+  stroke(50, 70, 90);
+  strokeWeight(1);
+  rect(width - 340, 20, 320, 320, 8);
+
+  fill(255);
+  textSize(14);
+  textAlign(LEFT, BASELINE);
+  text(showTopView ? "TOP VIEW: 360° DISPERSION" : "SIMULTANEOUS MULTI-FLIGHT", width - 325, 45);
+
+  stroke(80);
+  line(width - 325, 52, width - 30, 52);
+
+  textSize(11);
+  fill(0, 220, 255);
+  text("Cyan Path: Ideal Vacuum Trajectory", width - 325, 75);
+
+  fill(255, 150, 80);
+  text("Active Stream: " + totalRuns + " Parallel Flights", width - 325, 95);
+
+  if (impactPoints.size() > 0) {
+    float overshoots = 0;
+    float undershoots = 0;
+    for (PVector imp : impactPoints) {
+      if (imp.x > targetPoint.x) overshoots++;
+      else undershoots++;
+    }
+
+    fill(200);
+    text("Overshot Target: " + (int)overshoots + " runs", width - 325, 125);
+    text("Undershot Target: " + (int)undershoots + " runs", width - 325, 145);
+  }
+
+  stroke(60);
+  line(width - 325, 175, width - 30, 175);
+
+  fill(255);
+  text("Controls:", width - 325, 200);
+  fill(0, 255, 150);
+  text("[ V ] : Toggle Side / Top-Down View", width - 325, 225);
+  text("[ R ] : Reset & Relaunch All Paths", width - 325, 245);
+  text("[SPACE] : Pause / Resume Flight", width - 325, 265);
+}
+
+void drawTargetReticle(float tx, float ty) {
+  stroke(0, 255, 150);
+  strokeWeight(2);
+  noFill();
+  ellipse(tx, ty, 20, 20);
+  line(tx - 12, ty, tx + 12, ty);
+  line(tx, ty - 12, tx, ty + 12);
+}
+
+void initCSVTable() {
+  csvTable = new Table();
+  csvTable.addColumn("Run ID");
+  csvTable.addColumn("Impact X");
+  csvTable.addColumn("Lateral Offset Z");
+}
+
+void keyPressed() {
+  if (key == 'v' || key == 'V') {
+    showTopView = !showTopView;
+  } else if (key == 'r' || key == 'R') {
+    activeFrameIndex = 0;
+    isSimulating = true;
+    showTopView = false;
+    generateAllErrorPaths();
+  } else if (key == ' ') {
+    isSimulating = !isSimulating;
+  }
+}
