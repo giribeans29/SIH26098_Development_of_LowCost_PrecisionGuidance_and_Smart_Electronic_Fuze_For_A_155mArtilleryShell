@@ -1,0 +1,1142 @@
+import processing.serial.*;
+
+
+// ============================================================
+// SERIAL
+// ============================================================
+
+Serial myPort;
+
+boolean serialEnabled = true;
+
+// CHANGE TO COM5 IF YOUR ESP32 IS ON COM5
+String serialPortName = "COM6";
+
+
+// ============================================================
+// SCREEN
+// ============================================================
+
+int SCREEN_WIDTH = 1400;
+int SCREEN_HEIGHT = 700;
+
+
+// ============================================================
+// PHYSICS
+// ============================================================
+
+// EXACT FLIGHT TIME
+float FLIGHT_TIME = 15.0;
+
+// STANDARD GRAVITY
+float gravity = 9.81;
+
+
+// ============================================================
+// SCREEN / GROUND
+// ============================================================
+
+float launchX = 60;
+float launchY;
+
+
+// Maximum screen position that projectile can reach
+float trajectoryRight = 1050;
+
+
+// ============================================================
+// PROJECTILE PHYSICS
+// ============================================================
+
+// Position in REAL WORLD metres
+float worldX = 0;
+float worldY = 0;
+
+// Current velocity
+float vx = 0;
+float vy = 0;
+
+// Initial velocity components
+float vx0 = 0;
+float vy0 = 0;
+
+// Variable range
+float targetRange = 0;
+
+// Calculated values
+float launchAngleDeg = 0;
+float initialVelocity = 0;
+float maximumHeight = 0;
+
+
+// ============================================================
+// SCREEN POSITION
+// ============================================================
+
+float x;
+float y;
+
+// Conversion from metres to pixels
+float pixelsPerMeter;
+
+
+// ============================================================
+// TIME
+// ============================================================
+
+float elapsedTime = 0;
+
+long simulationStartMillis;
+
+boolean isPaused = false;
+
+long pauseStartMillis = 0;
+long totalPausedMillis = 0;
+
+boolean isSimulating = false;
+
+
+// ============================================================
+// TRAJECTORY
+// ============================================================
+
+ArrayList<PVector> path =
+  new ArrayList<PVector>();
+
+
+// ============================================================
+// TELEMETRY
+// ============================================================
+
+float desiredPitch = 0.0;
+float desiredRoll = 0.0;
+
+
+// ============================================================
+// SERIAL TIMER
+// ============================================================
+
+int lastSendTime = 0;
+
+int serialInterval = 20;
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup() {
+
+  // IMPORTANT:
+  // size() MUST be inside setup() in Java Mode.
+
+  size(1400, 700);
+
+  launchY = height - 80;
+
+
+  // ----------------------------------------------------------
+  // SERIAL PORT LIST
+  // ----------------------------------------------------------
+
+  println("=================================");
+  println("PROJECTILE SIMULATION");
+  println("=================================");
+
+  println("Available Serial Ports:");
+
+  printArray(Serial.list());
+
+
+  // ----------------------------------------------------------
+  // CONNECT ESP32
+  // ----------------------------------------------------------
+
+  if (serialEnabled) {
+
+    try {
+
+      myPort = new Serial(
+        this,
+        serialPortName,
+        115200
+      );
+
+      myPort.clear();
+
+      println(
+        "CONNECTED TO: " +
+        serialPortName
+      );
+
+      println(
+        "BAUD RATE: 115200"
+      );
+
+    }
+
+    catch (Exception e) {
+
+      println(
+        "ERROR: Could not open " +
+        serialPortName
+      );
+
+      println(e);
+
+      serialEnabled = false;
+    }
+  }
+
+
+  // ----------------------------------------------------------
+  // START PROJECTILE
+  // ----------------------------------------------------------
+
+  resetSimulation();
+}
+
+
+// ============================================================
+// DRAW
+// ============================================================
+
+void draw() {
+
+  background(20);
+
+
+  // ----------------------------------------------------------
+  // GROUND
+  // ----------------------------------------------------------
+
+  drawGround();
+
+
+  // ----------------------------------------------------------
+  // PHYSICS
+  // ----------------------------------------------------------
+
+  updateProjectile();
+
+
+  // ----------------------------------------------------------
+  // SEND TELEMETRY
+  // ----------------------------------------------------------
+
+  if (
+    millis() - lastSendTime >= serialInterval
+  ) {
+
+    sendReference();
+
+    lastSendTime = millis();
+  }
+
+
+  // ----------------------------------------------------------
+  // TRAJECTORY
+  // ----------------------------------------------------------
+
+  drawTrajectory();
+
+
+  // ----------------------------------------------------------
+  // PROJECTILE
+  // ----------------------------------------------------------
+
+  drawProjectile();
+
+
+  // ----------------------------------------------------------
+  // PANEL
+  // ----------------------------------------------------------
+
+  drawDataPanel();
+}
+
+
+// ============================================================
+// PROJECTILE UPDATE
+// ============================================================
+
+void updateProjectile() {
+
+  if (!isSimulating) {
+    return;
+  }
+
+  if (isPaused) {
+    return;
+  }
+
+
+  // ==========================================================
+  // REAL TIME
+  // ==========================================================
+
+  elapsedTime =
+    (
+      millis()
+      -
+      simulationStartMillis
+      -
+      totalPausedMillis
+    )
+    /
+    1000.0;
+
+
+  // ==========================================================
+  // EXACT 15 SECOND LIMIT
+  // ==========================================================
+
+  if (elapsedTime >= FLIGHT_TIME) {
+
+    elapsedTime = FLIGHT_TIME;
+
+
+    // EXACT END POSITION
+
+    worldX = targetRange;
+    worldY = 0;
+
+
+    x =
+      launchX +
+      worldX * pixelsPerMeter;
+
+    y =
+      launchY;
+
+
+    // Exact final velocity
+
+    vx = vx0;
+
+    vy = -vy0;
+
+
+    desiredPitch =
+      degrees(
+        atan2(
+          vy,
+          vx
+        )
+      );
+
+
+    // Stop simulation
+
+    isSimulating = false;
+
+
+    println(
+      "15.000 seconds completed."
+    );
+
+    return;
+  }
+
+
+  // ==========================================================
+  // PHYSICS EQUATIONS
+  // ==========================================================
+
+  // Horizontal position
+
+  worldX =
+    vx0 *
+    elapsedTime;
+
+
+  // Vertical position
+
+  worldY =
+    (
+      vy0 *
+      elapsedTime
+    )
+    -
+    (
+      0.5 *
+      gravity *
+      elapsedTime *
+      elapsedTime
+    );
+
+
+  // Prevent tiny negative values
+
+  if (worldY < 0) {
+    worldY = 0;
+  }
+
+
+  // ==========================================================
+  // VELOCITY
+  // ==========================================================
+
+  vx = vx0;
+
+  vy =
+    vy0 -
+    gravity *
+    elapsedTime;
+
+
+  // ==========================================================
+  // PITCH
+  // ==========================================================
+
+  desiredPitch =
+    degrees(
+      atan2(
+        vy,
+        vx
+      )
+    );
+
+  desiredRoll = 0;
+
+
+  // ==========================================================
+  // CONVERT METRES → PIXELS
+  // ==========================================================
+
+  x =
+    launchX +
+    worldX * pixelsPerMeter;
+
+  y =
+    launchY -
+    worldY * pixelsPerMeter;
+
+
+  // Absolute protection
+
+  if (y > launchY) {
+    y = launchY;
+  }
+
+
+  // ==========================================================
+  // SAVE TRAJECTORY
+  // ==========================================================
+
+  path.add(
+    new PVector(
+      x,
+      y
+    )
+  );
+}
+
+
+// ============================================================
+// RESET SIMULATION
+// ============================================================
+
+void resetSimulation() {
+
+  println();
+  println("=================================");
+  println("NEW TRAJECTORY");
+  println("=================================");
+
+
+  // ----------------------------------------------------------
+  // RESET TIME
+  // ----------------------------------------------------------
+
+  elapsedTime = 0;
+
+  totalPausedMillis = 0;
+
+  pauseStartMillis = 0;
+
+
+  // ----------------------------------------------------------
+  // RESET STATE
+  // ----------------------------------------------------------
+
+  isPaused = false;
+
+  isSimulating = true;
+
+
+  // ----------------------------------------------------------
+  // CLEAR OLD PATH
+  // ----------------------------------------------------------
+
+  path.clear();
+
+
+  // ==========================================================
+  // RANDOM RANGE
+  // ==========================================================
+  //
+  // Range changes every time.
+  //
+  // Flight time NEVER changes.
+  //
+  // ==========================================================
+
+  targetRange =
+    random(
+      500,
+      900
+    );
+
+
+  // ==========================================================
+  // VERTICAL VELOCITY
+  // ==========================================================
+  //
+  // T = 2Vy/g
+  //
+  // Therefore:
+  //
+  // Vy = gT/2
+  //
+  // For 15 seconds:
+  //
+  // Vy = 73.575 m/s
+  //
+  // ==========================================================
+
+  vy0 =
+    gravity *
+    FLIGHT_TIME /
+    2.0;
+
+
+  // ==========================================================
+  // HORIZONTAL VELOCITY
+  // ==========================================================
+  //
+  // Range = Vx * T
+  //
+  // Vx = Range / T
+  //
+  // ==========================================================
+
+  vx0 =
+    targetRange /
+    FLIGHT_TIME;
+
+
+  // ==========================================================
+  // INITIAL SPEED
+  // ==========================================================
+
+  initialVelocity =
+    sqrt(
+      vx0 * vx0 +
+      vy0 * vy0
+    );
+
+
+  // ==========================================================
+  // LAUNCH ANGLE
+  // ==========================================================
+
+  launchAngleDeg =
+    degrees(
+      atan2(
+        vy0,
+        vx0
+      )
+    );
+
+
+  // ==========================================================
+  // MAXIMUM HEIGHT
+  // ==========================================================
+
+  maximumHeight =
+    (
+      vy0 * vy0
+    )
+    /
+    (
+      2.0 *
+      gravity
+    );
+
+
+  // ==========================================================
+  // SCREEN SCALING
+  // ==========================================================
+
+  float availableWidth =
+    trajectoryRight -
+    launchX;
+
+
+  float availableHeight =
+    launchY -
+    60;
+
+
+  // Scale needed horizontally
+
+  float horizontalScale =
+    availableWidth /
+    targetRange;
+
+
+  // Scale needed vertically
+
+  float verticalScale =
+    availableHeight /
+    maximumHeight;
+
+
+  // Use whichever is smaller
+
+  pixelsPerMeter =
+    min(
+      horizontalScale,
+      verticalScale
+    );
+
+
+  // 90% gives a safety margin
+
+  pixelsPerMeter *= 0.90;
+
+
+  // ==========================================================
+  // INITIAL POSITION
+  // ==========================================================
+
+  worldX = 0;
+  worldY = 0;
+
+  x = launchX;
+  y = launchY;
+
+
+  // ==========================================================
+  // INITIAL VELOCITY
+  // ==========================================================
+
+  vx = vx0;
+  vy = vy0;
+
+
+  // ==========================================================
+  // TELEMETRY
+  // ==========================================================
+
+  desiredPitch =
+    launchAngleDeg;
+
+  desiredRoll = 0;
+
+
+  // ==========================================================
+  // START REAL CLOCK
+  // ==========================================================
+
+  simulationStartMillis =
+    millis();
+
+
+  // ==========================================================
+  // DEBUG INFORMATION
+  // ==========================================================
+
+  println(
+    "Range: " +
+    nf(
+      targetRange,
+      0,
+      2
+    ) +
+    " m"
+  );
+
+  println(
+    "Flight time: 15.000 s"
+  );
+
+  println(
+    "Maximum height: " +
+    nf(
+      maximumHeight,
+      0,
+      2
+    ) +
+    " m"
+  );
+
+  println(
+    "Launch angle: " +
+    nf(
+      launchAngleDeg,
+      0,
+      2
+    ) +
+    " degrees"
+  );
+
+  println(
+    "Initial velocity: " +
+    nf(
+      initialVelocity,
+      0,
+      2
+    ) +
+    " m/s"
+  );
+}
+
+
+// ============================================================
+// SERIAL TRANSMISSION
+// ============================================================
+
+void sendReference() {
+
+  if (
+    !serialEnabled ||
+    myPort == null
+  ) {
+    return;
+  }
+
+
+  String packet =
+    nf(
+      desiredPitch,
+      0,
+      2
+    )
+    +
+    ","
+    +
+    nf(
+      desiredRoll,
+      0,
+      2
+    )
+    +
+    "\n";
+
+
+  myPort.write(packet);
+}
+
+
+// ============================================================
+// GROUND
+// ============================================================
+
+void drawGround() {
+
+  stroke(80);
+
+  strokeWeight(2);
+
+
+  line(
+    0,
+    launchY,
+    trajectoryRight + 30,
+    launchY
+  );
+
+
+  // Start marker
+
+  stroke(120);
+
+  line(
+    launchX,
+    launchY - 10,
+    launchX,
+    launchY + 10
+  );
+
+
+  // End marker
+
+  float endX =
+    launchX +
+    targetRange *
+    pixelsPerMeter;
+
+
+  line(
+    endX,
+    launchY - 10,
+    endX,
+    launchY + 10
+  );
+
+
+  fill(130);
+
+  textSize(12);
+
+
+  text(
+    "START",
+    launchX - 20,
+    launchY + 25
+  );
+
+
+  text(
+    "END",
+    endX - 10,
+    launchY + 25
+  );
+}
+
+
+// ============================================================
+// TRAJECTORY
+// ============================================================
+
+void drawTrajectory() {
+
+  noFill();
+
+  stroke(
+    0,
+    200,
+    255,
+    180
+  );
+
+  strokeWeight(2);
+
+
+  beginShape();
+
+
+  for (
+    PVector p : path
+  ) {
+
+    // Never allow line below ground
+
+    float safeY =
+      min(
+        p.y,
+        launchY
+      );
+
+
+    vertex(
+      p.x,
+      safeY
+    );
+  }
+
+
+  endShape();
+}
+
+
+// ============================================================
+// PROJECTILE
+// ============================================================
+
+void drawProjectile() {
+
+  noStroke();
+
+  fill(
+    255,
+    220,
+    0
+  );
+
+
+  ellipse(
+    x,
+    y,
+    14,
+    14
+  );
+}
+
+
+// ============================================================
+// DATA PANEL
+// ============================================================
+
+void drawDataPanel() {
+
+  float panelX = 1080;
+  float panelY = 20;
+
+
+  fill(
+    10,
+    10,
+    15,
+    230
+  );
+
+  stroke(
+    50,
+    70,
+    90
+  );
+
+  strokeWeight(1);
+
+
+  rect(
+    panelX,
+    panelY,
+    300,
+    360,
+    8
+  );
+
+
+  fill(255);
+
+  textSize(16);
+
+
+  text(
+    "TELEMETRY SENDER",
+    panelX + 20,
+    panelY + 30
+  );
+
+
+  stroke(80);
+
+
+  line(
+    panelX + 20,
+    panelY + 42,
+    panelX + 280,
+    panelY + 42
+  );
+
+
+  // ----------------------------------------------------------
+  // TIME
+  // ----------------------------------------------------------
+
+  fill(200);
+
+  textSize(13);
+
+
+  text(
+    "Time Elapsed: " +
+    nf(
+      elapsedTime,
+      0,
+      3
+    ) +
+    " / 15.000 s",
+    panelX + 20,
+    panelY + 75
+  );
+
+
+  // ----------------------------------------------------------
+  // RANGE
+  // ----------------------------------------------------------
+
+  text(
+    "Range: " +
+    nf(
+      targetRange,
+      0,
+      1
+    ) +
+    " m",
+    panelX + 20,
+    panelY + 100
+  );
+
+
+  // ----------------------------------------------------------
+  // HEIGHT
+  // ----------------------------------------------------------
+
+  text(
+    "Maximum Height: " +
+    nf(
+      maximumHeight,
+      0,
+      1
+    ) +
+    " m",
+    panelX + 20,
+    panelY + 125
+  );
+
+
+  // ----------------------------------------------------------
+  // ANGLE
+  // ----------------------------------------------------------
+
+  text(
+    "Launch Angle: " +
+    nf(
+      launchAngleDeg,
+      0,
+      2
+    ) +
+    "°",
+    panelX + 20,
+    panelY + 150
+  );
+
+
+  // ----------------------------------------------------------
+  // SPEED
+  // ----------------------------------------------------------
+
+  text(
+    "Initial Velocity: " +
+    nf(
+      initialVelocity,
+      0,
+      1
+    ) +
+    " m/s",
+    panelX + 20,
+    panelY + 175
+  );
+
+
+  // ----------------------------------------------------------
+  // TELEMETRY
+  // ----------------------------------------------------------
+
+  stroke(60);
+
+
+  line(
+    panelX + 20,
+    panelY + 195,
+    panelX + 280,
+    panelY + 195
+  );
+
+
+  fill(
+    100,
+    255,
+    150
+  );
+
+
+  text(
+    "Desired Pitch: " +
+    nf(
+      desiredPitch,
+      0,
+      2
+    ) +
+    "°",
+    panelX + 20,
+    panelY + 225
+  );
+
+
+  text(
+    "Desired Roll: " +
+    nf(
+      desiredRoll,
+      0,
+      2
+    ) +
+    "°",
+    panelX + 20,
+    panelY + 250
+  );
+
+
+  // ----------------------------------------------------------
+  // SERIAL
+  // ----------------------------------------------------------
+
+  fill(180);
+
+
+  text(
+    "Port: " +
+    serialPortName,
+    panelX + 20,
+    panelY + 285
+  );
+
+
+  text(
+    "Status: " +
+    (
+      serialEnabled
+      ?
+      "CONNECTED"
+      :
+      "DISCONNECTED"
+    ),
+    panelX + 20,
+    panelY + 310
+  );
+
+
+  fill(120);
+
+
+  text(
+    "R = Reset",
+    panelX + 20,
+    panelY + 340
+  );
+}
+
+
+// ============================================================
+// KEYBOARD
+// ============================================================
+
+void keyPressed() {
+
+  if (
+    key == 'r' ||
+    key == 'R'
+  ) {
+
+    resetSimulation();
+  }
+
+
+  else if (
+    key == ' '
+  ) {
+
+    if (!isPaused) {
+
+      isPaused = true;
+
+      pauseStartMillis =
+        millis();
+    }
+
+    else {
+
+      isPaused = false;
+
+      totalPausedMillis +=
+        millis()
+        -
+        pauseStartMillis;
+    }
+  }
+}
