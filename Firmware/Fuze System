@@ -1,0 +1,225 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <HardwareSerial.h>
+
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+
+// I2C Pins for ESP32-C3 (OLED)
+#define OLED_SDA 8
+#define OLED_SCL 9
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+
+// UART Pins for TFmini Plus LIDAR
+#define TFMINI_RX_PIN 20 // Connect to TFmini Green wire (TX)
+#define TFMINI_TX_PIN 21 // Connect to TFmini White wire (RX)
+HardwareSerial TFSerial(1); 
+
+// GPIO Mapping matched to your diagram
+#define BTN_ARM_PIN 3      // Labeled "ARMED"
+#define BTN_TIMER_PIN 4    // Labeled "Timing Detonater"
+#define BTN_PROX_PIN 5     // Labeled "Proximity Button"
+#define BTN_RESET_PIN 10   // Labeled "Reset Simulation" 
+#define BTN_IMMED_PIN 2    // Labeled "Immediate Detonate"
+
+// Maximum distance to trigger detonation (in cm)
+#define PROXIMITY_MAX_CM 15
+
+enum SystemState { STATE_DISARMED, STATE_ARMED, STATE_COUNTDOWN, STATE_PROX_ACTIVE, STATE_DETONATED };
+SystemState currentState = STATE_DISARMED;
+
+unsigned long timerStartMillis = 0;
+const unsigned long COUNTDOWN_DURATION = 5000; // 5 seconds
+
+// Track last printed serial state to avoid flooding the serial monitor
+SystemState lastSerialState = (SystemState)-1;
+
+// Global variable to hold the latest distance
+int currentDistanceCM = 999; 
+
+// --- TFMINI PLUS UART PARSER ---
+// This function reads the UART buffer in the background
+void updateLidarDistance() {
+  while (TFSerial.available() >= 9) {
+    if (TFSerial.read() == 0x59) { // Check first header byte
+      if (TFSerial.read() == 0x59) { // Check second header byte
+        
+        int dist_L = TFSerial.read();
+        int dist_H = TFSerial.read();
+        int strength_L = TFSerial.read();
+        int strength_H = TFSerial.read();
+        TFSerial.read(); // temp_L
+        TFSerial.read(); // temp_H
+        TFSerial.read(); // checksum
+        
+        int distance = dist_L + (dist_H << 8);
+        int strength = strength_L + (strength_H << 8);
+
+        // Accept reading if signal strength is reliable (>100)
+        if (strength > 100 && distance > 0) {
+          currentDistanceCM = distance;
+        }
+      }
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // Configure hardware pins
+  pinMode(BTN_ARM_PIN, INPUT_PULLUP);
+  pinMode(BTN_TIMER_PIN, INPUT_PULLUP);
+  pinMode(BTN_PROX_PIN, INPUT_PULLUP);
+  pinMode(BTN_RESET_PIN, INPUT_PULLUP);
+  pinMode(BTN_IMMED_PIN, INPUT_PULLUP);
+
+  // Initialize UART1 for the TFmini Plus
+  TFSerial.begin(115200, SERIAL_8N1, TFMINI_RX_PIN, TFMINI_TX_PIN);
+
+  // Initialize I2C OLED display
+  Wire.begin(OLED_SDA, OLED_SCL);
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println(F("OLED allocation failed"));
+    for(;;);
+  }
+
+  updateDisplay(); 
+}
+
+void loop() {
+  // Always update LIDAR in the background to keep the buffer fresh
+  updateLidarDistance();
+
+  // 1. SYSTEM RESET LOGIC (Highest Priority)
+  if (digitalRead(BTN_RESET_PIN) == LOW) {
+    if (currentState != STATE_DISARMED) {
+      currentState = STATE_DISARMED;
+      updateDisplay();
+      delay(300); // Debounce
+    }
+  }
+  
+  // Halt scanning for regular inputs if already triggered
+  if (currentState == STATE_DETONATED) {
+    reportStateToSerial();
+    return;
+  }
+
+  // 2. IMMEDIATE DETONATION LOGIC (Overrides countdown and proximity)
+  if (digitalRead(BTN_IMMED_PIN) == LOW && currentState != STATE_DISARMED) {
+    currentState = STATE_DETONATED;
+    updateDisplay();
+    delay(300); // Debounce
+    reportStateToSerial();
+    return;
+  }
+
+  // 3. ARM LOGIC
+  if (digitalRead(BTN_ARM_PIN) == LOW && currentState == STATE_DISARMED) {
+    currentState = STATE_ARMED;
+    updateDisplay();
+    delay(300); // Debounce
+  }
+  
+  // 4. TIMER LOGIC
+  else if (digitalRead(BTN_TIMER_PIN) == LOW && currentState == STATE_ARMED) {
+    currentState = STATE_COUNTDOWN;
+    timerStartMillis = millis();
+    delay(300); // Debounce
+  }
+
+  // 5. PROXIMITY ACTIVATION LOGIC
+  else if (digitalRead(BTN_PROX_PIN) == LOW && currentState == STATE_ARMED) {
+    currentState = STATE_PROX_ACTIVE;
+    updateDisplay(); 
+    delay(300); // Debounce
+  }
+
+  // --- NON-BLOCKING STATE EXECUTIONS ---
+
+  // Handle live countdown rendering
+  if (currentState == STATE_COUNTDOWN) {
+    unsigned long elapsedMillis = millis() - timerStartMillis;
+    if (elapsedMillis >= COUNTDOWN_DURATION) {
+      currentState = STATE_DETONATED;
+      updateDisplay();
+    } else {
+      updateDisplay(); // Refresh the timer on screen
+    }
+  }
+  
+  // Handle active LIDAR scanning
+  if (currentState == STATE_PROX_ACTIVE) {
+    // DEBUG: Print the distance so you can see if the sensor is working
+    Serial.print("LIDAR reading (cm): ");
+    Serial.println(currentDistanceCM);
+    
+    // Trigger if exact distance is a maximum of 15cm (15 or less)
+    if (currentDistanceCM <= PROXIMITY_MAX_CM && currentDistanceCM > 0) {
+      currentState = STATE_DETONATED;
+      updateDisplay();
+    }
+    
+    delay(50); // Small pause to prevent serial flooding
+  }
+
+  // Send status to Serial if it changed
+  reportStateToSerial();
+}
+
+// --- HELPER TO SEND SERIAL DATA ---
+void reportStateToSerial() {
+  if (currentState != lastSerialState) {
+    lastSerialState = currentState;
+    switch (currentState) {
+      case STATE_DISARMED:
+        Serial.println("STATUS: DISARMED");
+        break;
+      case STATE_ARMED:
+        Serial.println("STATUS: ARMED");
+        break;
+      case STATE_COUNTDOWN:
+        Serial.println("STATUS: COUNTDOWN_STARTED");
+        break;
+      case STATE_PROX_ACTIVE:
+        Serial.println("STATUS: PROXIMITY_ARMED");
+        break;
+      case STATE_DETONATED:
+        Serial.println("STATUS: DETONATED");
+        break;
+    }
+  }
+}
+
+// --- DISPLAY RENDER LOGIC ---
+void updateDisplay() {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 25);
+
+  if (currentState == STATE_DISARMED) {
+    display.println("Disarmed!");
+  } 
+  else if (currentState == STATE_ARMED) {
+    display.println("Armed !");
+  } 
+  else if (currentState == STATE_PROX_ACTIVE) {
+    display.println("LIDAR SET!"); // Updated for LIDAR mode
+  }
+  else if (currentState == STATE_COUNTDOWN) {
+    unsigned long elapsedMillis = millis() - timerStartMillis;
+    long secondsRemaining = (COUNTDOWN_DURATION - elapsedMillis) / 1000 + 1;
+    
+    display.print("Time: ");
+    display.print(secondsRemaining);
+  } 
+  else if (currentState == STATE_DETONATED) {
+    display.println("Detonated!");
+  }
+
+  display.display();
+}
