@@ -1,0 +1,130 @@
+int NUM_SIMS = 1000;
+PVector[] guidedPoints = new PVector[NUM_SIMS];
+int currentSim = 0; 
+
+PVector target = new PVector(0, 18348, 0); 
+float guidedCEP = 0;
+float maxCanardForce = 25.0; 
+
+void setup() {
+  size(1000, 800); 
+  pixelDensity(displayDensity());
+}
+
+void draw() {
+  int simsPerFrame = 5; 
+  
+  for (int i = 0; i < simsPerFrame; i++) {
+    if (currentSim < NUM_SIMS) {
+      float windX = randomGaussian() * 0.08; 
+      float windY = randomGaussian() * 0.08; 
+      float vNoiseX = randomGaussian() * 0.5; 
+      float vNoiseY = randomGaussian() * 0.5;
+      float vNoiseZ = randomGaussian() * 0.5;
+      
+      guidedPoints[currentSim] = simulateGuidedFlight(windX, windY, vNoiseX, vNoiseY, vNoiseZ);
+      currentSim++;
+      
+      guidedCEP = calculateDynamicCEP(guidedPoints, target, currentSim);
+    }
+  }
+  
+  background(15, 20, 25); 
+  pushMatrix();
+  translate(width / 2, height / 2);
+  
+  float scaleFactor = 1.2; 
+  
+  stroke(40);
+  strokeWeight(1);
+  for(int i = -width; i < width; i += (50 * scaleFactor)) {
+    line(i, -height, i, height);
+    line(-width, i, width, i);
+  }
+  
+  noStroke();
+  fill(50, 255, 100, 180); 
+  for (int i = 0; i < currentSim; i++) {
+    float drawX = (guidedPoints[i].x - target.x) * scaleFactor;
+    float drawY = -(guidedPoints[i].y - target.y) * scaleFactor; 
+    ellipse(drawX, drawY, 4, 4);
+  }
+  
+  if (currentSim > 0) {
+    stroke(100, 255, 100);
+    strokeWeight(2);
+    ellipse(0, 0, guidedCEP * 2 * scaleFactor, guidedCEP * 2 * scaleFactor);
+  }
+  
+  stroke(255, 255, 0);
+  strokeWeight(2);
+  line(-15, 0, 15, 0);
+  line(0, -15, 0, 15);
+  popMatrix();
+  
+  fill(255);
+  textSize(22);
+  text("155mm GUIDED SYSTEM: MONTE CARLO", 20, 40);
+  
+  textSize(16);
+  fill(200);
+  text("Iterations: " + currentSim + " / " + NUM_SIMS, 20, 70); 
+  
+  fill(100, 255, 100);
+  text("Guided 50% CEP: " + nf(guidedCEP, 0, 2) + " m", 20, 100);
+}
+
+PVector simulateGuidedFlight(float windX, float windY, float vNoiseX, float vNoiseY, float vNoiseZ) {
+  PVector pos = new PVector(0, 0, 0); 
+  PVector vel = new PVector(0 + vNoiseX, 300 + vNoiseY, 300 + vNoiseZ); 
+  PVector gravity = new PVector(0, 0, -9.81);
+  float dt = 0.05; 
+  
+  while (pos.z >= 0) {
+    PVector acc = gravity.copy();
+    acc.x += windX;
+    acc.y += windY;
+    
+    if (vel.z < 0) {
+      float g = 9.81;
+      float discriminant = (vel.z * vel.z) + (2 * g * pos.z);
+      float timeLeft = (vel.z + sqrt(discriminant)) / g; 
+      
+      if (timeLeft > 0.2) {
+        float predictedX = pos.x + (vel.x * timeLeft);
+        float predictedY = pos.y + (vel.y * timeLeft);
+        
+        float missX = target.x - predictedX;
+        float missY = target.y - predictedY;
+        
+        float reqAccX = (2 * missX) / (timeLeft * timeLeft);
+        float reqAccY = (2 * missY) / (timeLeft * timeLeft);
+        
+        PVector correction = new PVector(reqAccX, reqAccY, 0);
+        correction.mult(0.42); // Balances performance for realistic error reduction
+        
+        if (correction.mag() > maxCanardForce) {
+          correction.normalize().mult(maxCanardForce);
+        }
+        
+        acc.add(correction);
+      }
+    }
+    
+    vel.add(PVector.mult(acc, dt));
+    pos.add(PVector.mult(vel, dt));
+    
+    if(pos.y > 40000 || pos.y < -5000) break; 
+  }
+  return new PVector(pos.x, pos.y);
+}
+
+float calculateDynamicCEP(PVector[] points, PVector tgt, int currentCount) {
+  if (currentCount == 0) return 0;
+  float[] distances = new float[currentCount];
+  for (int i = 0; i < currentCount; i++) {
+    distances[i] = dist(points[i].x, points[i].y, tgt.x, tgt.y);
+  }
+  distances = sort(distances);
+  return distances[distances.length / 2];
+}
