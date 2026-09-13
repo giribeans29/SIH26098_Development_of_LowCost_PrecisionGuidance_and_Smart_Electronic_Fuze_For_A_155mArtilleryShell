@@ -1,10 +1,5 @@
 # 🚀 Smart 155mm Artillery Fuze & Embedded Flight Computer
 
-![SIH Badge](https://img.shields.io/badge/Smart_India_Hackathon-2026-orange?style=for-the-badge)
-![ESP32](https://img.shields.io/badge/Platform-ESP32--C3-blue?style=for-the-badge)
-![Control](https://img.shields.io/badge/Control_Logic-PID-FF6F00?style=for-the-badge)
-![C++](https://img.shields.io/badge/Language-C++-00599C?style=for-the-badge)
-
 ## 📌 Project Overview
 This repository contains the firmware and hardware architecture for a highly miniaturized, self-contained fuzing system and flight computer designed for a 155mm artillery shell prototype. 
 
